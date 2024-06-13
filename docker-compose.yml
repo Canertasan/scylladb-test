@@ -1,0 +1,17 @@
+version: '3.7'
+
+services:
+  scylla:
+    image: scylladb/scylla
+    ports:
+      - "9042:9042"
+    networks:
+      - scylla-network
+    volumes:
+      - scylla-data:/var/lib/scylla
+
+networks:
+  scylla-network:
+
+volumes:
+  scylla-data:
