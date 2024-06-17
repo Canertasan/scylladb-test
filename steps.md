@@ -15,30 +15,42 @@ CREATE TABLE translation_keys (
 CREATE TABLE translations (
     translation_key_name TEXT,
     value TEXT,
-    locale TEXT,
+    locale_code TEXT,
     entry_type TEXT,
-    PRIMARY KEY (translation_key_name, locale)
+    entry_id TEXT,
+    PRIMARY KEY (translation_key_name, locale_code)
 );
 
-CREATE MATERIALIZED VIEW translations_by_entry_type_locale AS
+CREATE MATERIALIZED VIEW translations_by_entry_type_locale_code AS
     SELECT * FROM translations
-    WHERE entry_type IS NOT NULL AND locale IS NOT NULL 
-    PRIMARY KEY ((entry_type, locale), translation_key_name);
+    WHERE entry_type IS NOT NULL AND locale_code IS NOT NULL 
+    PRIMARY KEY ((entry_type, locale_code), translation_key_name);
 
 
-//
-
-CREATE TABLE translations (
-    id UUID,
-    key_id INT,
-    value TEXT,
-    entry_type TEXT,
-    locale TEXT,
-    PRIMARY KEY ((locale, id))
+CREATE TABLE countries (
+    code TEXT PRIMARY KEY,
+    title TEXT,
+    title_local TEXT,
+    default_locale TEXT,
+    currency TEXT,
+    is_disabled BOOLEAN,
 );
 
-CREATE MATERIALIZED VIEW translations_by_entry_locale AS
-    SELECT * FROM translations
-    WHERE entry_type IS NOT NULL AND locale IS NOT NULL AND id IS NOT NULL
-    PRIMARY KEY (entry_type, locale, id);
+CREATE TABLE languages (
+    code TEXT PRIMARY KEY,
+    title TEXT,
+    title_local TEXT,
+);
+
+CREATE TABLE locales (
+    code TEXT PRIMARY KEY,
+    country_code TEXT,
+    language_code TEXT,
+    fallback TEXT,
+);
+
+CREATE MATERIALIZED VIEW locales_by_country_code AS
+    SELECT * FROM locales
+    WHERE country_code IS NOT NULL
+    PRIMARY KEY (country_code, code);
 ```

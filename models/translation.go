@@ -4,8 +4,9 @@ type Translation struct {
 	// ID        gocql.UUID
 	TranslationKeyName string
 	Value              string
-	Locale             string
+	LocaleCode         string
 	EntryType          string
+	EntryID            string
 }
 
 type MinimalTranslation struct {
@@ -15,6 +16,6 @@ type MinimalTranslation struct {
 
 type Bundle struct {
 	EntryType    string
-	Locale       string
+	LocaleCode   string
 	Translations []MinimalTranslation
 }

@@ -21,30 +21,29 @@ func main() {
 	}
 	defer session.Close()
 
-	tk := generateTranslationKey()
-	t := generateTranslation(tk)
-	saveTranslation(session, t)
-	saveTranslationKey(session, tk)
-	b := queryTranslationsByEntryLocale(session, "mobile", "es")
-	// fmt.Printf("%#v", b)
+	// Seed data
+	seedTranslationAndTranslationKey(session)
+	seedLocaleData(session)
+
+	b := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
 
 	by, _ := json.MarshalIndent(b, "", "  ")
 	fmt.Printf("%s", by)
 }
 
-func queryTranslationsByEntryLocale(session *gocql.Session, entryType, locale string) []models.Bundle {
+func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) []models.Bundle {
 	var bundles []models.Bundle
 	var bundle models.Bundle
 	var translation models.MinimalTranslation
 
 	t := time.Now()
-	iter := session.Query(`SELECT translation_key_name, value FROM translations_by_entry_type_locale WHERE entry_type = ? AND locale = ?`,
-		entryType, locale).Iter()
+	iter := session.Query(`SELECT translation_key_name, value FROM translations_by_entry_type_locale_code WHERE entry_type = ? AND locale_code = ?`,
+		entryType, locale_code).Iter()
 
 	for iter.Scan(&translation.TranslationKeyName, &translation.Value) {
 		bundle = models.Bundle{
 			EntryType:    entryType,
-			Locale:       locale,
+			LocaleCode:   locale_code,
 			Translations: []models.MinimalTranslation{translation},
 		}
 		bundles = append(bundles, bundle)
@@ -58,114 +57,112 @@ func queryTranslationsByEntryLocale(session *gocql.Session, entryType, locale st
 	return bundles
 }
 
-func saveTranslationKey(session *gocql.Session, tk models.TranslationKey) {
-	if err := session.Query(`INSERT INTO translation_keys (name, entry_type) VALUES (?, ?)`,
-		tk.Name, tk.EntryType).Exec(); err != nil {
-		log.Println("Insert error in translation_keys table:", err)
+func seedLocaleData(session *gocql.Session) {
+	baseLocale := generateBaseLocale()
+	country := generateCountry()
+	language := generateLanguage()
+	locale := generateLocale(country, language)
+	saveBaseLocale(session, baseLocale)
+	saveCountry(session, country)
+	saveLanguage(session, language)
+	saveLocale(session, locale)
+}
+
+func generateBaseLocale() models.Locale {
+	return models.Locale{
+		Code: "en",
 	}
 }
 
-func saveTranslation(session *gocql.Session, t models.Translation) {
-	if err := session.Query(`INSERT INTO translations (translation_key_name, value, locale, entry_type) VALUES (?, ?, ?, ?)`,
-		t.TranslationKeyName, t.Value, t.Locale, t.EntryType).Exec(); err != nil {
-		log.Println("Insert error in translations table:", err)
+func generateCountry() models.Country {
+	return models.Country{
+		Code:          "NL",
+		Title:         "Netherlands",
+		TitleLocal:    "Nederland",
+		DefaultLocale: "en-NL",
+		Currency:      "EUR",
+		IsDisabled:    false,
 	}
+}
+
+func generateLanguage() models.Language {
+	return models.Language{
+		Code:       "en",
+		Title:      "English",
+		TitleLocal: "English",
+	}
+}
+
+func generateLocale(country models.Country, language models.Language) models.Locale {
+	return models.Locale{
+		CountryCode:  country.Code,
+		LanguageCode: language.Code,
+		Code:         country.DefaultLocale,
+		Fallback:     "en",
+	}
+}
+
+func saveBaseLocale(session *gocql.Session, baseLocale models.Locale) {
+	if err := session.Query(`INSERT INTO locales (country_code, language_code, code, fallback) VALUES (?, ?, ?, ?)`,
+		baseLocale.CountryCode, baseLocale.LanguageCode, baseLocale.Code, baseLocale.Fallback).Exec(); err != nil {
+		log.Println("Insert error in locales table:", err)
+	}
+}
+
+func saveCountry(session *gocql.Session, country models.Country) {
+	if err := session.Query(`INSERT INTO countries (code, title, title_local, default_locale, currency, is_disabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		country.Code, country.Title, country.TitleLocal, country.DefaultLocale, country.Currency, country.IsDisabled).Exec(); err != nil {
+		log.Println("Insert error in countries table:", err)
+	}
+}
+
+func saveLanguage(session *gocql.Session, language models.Language) {
+	if err := session.Query(`INSERT INTO languages (code, title, title_local) VALUES (?, ?, ?)`,
+		language.Code, language.Title, language.TitleLocal).Exec(); err != nil {
+		log.Println("Insert error in languages table:", err)
+	}
+}
+
+func saveLocale(session *gocql.Session, locale models.Locale) {
+	if err := session.Query(`INSERT INTO locales (country_code, language_code, code, fallback) VALUES (?, ?, ?, ?)`,
+		locale.CountryCode, locale.LanguageCode, locale.Code, locale.Fallback).Exec(); err != nil {
+		log.Println("Insert error in locales table:", err)
+	}
+}
+
+func seedTranslationAndTranslationKey(session *gocql.Session) {
+	tk := generateTranslationKey()
+	t := generateTranslation(tk)
+	saveTranslation(session, t)
+	saveTranslationKey(session, tk)
 }
 
 func generateTranslationKey() models.TranslationKey {
 	return models.TranslationKey{
-		Name:      "TermsAndConditions",
-		EntryType: "mobile",
+		Name:      "TERMS_AND_CONDITIONS",
+		EntryType: "11",
 	}
 }
 
 func generateTranslation(tk models.TranslationKey) models.Translation {
 	return models.Translation{
 		TranslationKeyName: tk.Name,
-		Value:              "Términos y condiciones",
-		Locale:             "es",
+		Value:              "Terms and conditions",
+		LocaleCode:         "en-NL",
 		EntryType:          tk.EntryType,
 	}
 }
 
-// import (
-// 	"fmt"
-// 	"log"
+func saveTranslation(session *gocql.Session, t models.Translation) {
+	if err := session.Query(`INSERT INTO translations (translation_key_name, value, locale_code, entry_type, entry_id) VALUES (?, ?, ?, ?, ?)`,
+		t.TranslationKeyName, t.Value, t.LocaleCode, t.EntryType, t.EntryID).Exec(); err != nil {
+		log.Println("Insert error in translations table:", err)
+	}
+}
 
-// 	"github.com/gocql/gocql"
-// )
-
-// func main() {
-// 	// Connect to ScyllaDB
-// 	cluster := gocql.NewCluster("127.0.0.1")
-// 	cluster.Keyspace = "translations"
-// 	cluster.Consistency = gocql.Quorum
-// 	session, err := cluster.CreateSession()
-// 	if err != nil {
-// 		log.Fatal("Unable to connect to ScyllaDB:", err)
-// 	}
-// 	defer session.Close()
-
-// 	// Seed data
-// 	seedData(session)
-
-// 	// Query data based on entry_type and locale
-// 	entryType := "mobile"
-// 	locale := "en"
-// 	translations := queryTranslationsByEntryLocale(session, entryType, locale)
-// 	for _, translation := range translations {
-// 		fmt.Printf("ID: %s, KeyID: %d, Value: %s, EntryType: %s, Locale: %s\n",
-// 			translation.id, translation.keyID, translation.value, translation.entryType, translation.locale)
-// 	}
-// }
-
-// func seedData(session *gocql.Session) {
-// 	translations := []struct {
-// 		keyID     int
-// 		value     string
-// 		entryType string
-// 		locale    string
-// 	}{
-// 		{1, "Hello", "mobile", "en"},
-// 		{1, "Hola", "mobile", "es"},
-// 		{2, "Goodbye", "web", "en"},
-// 	}
-
-// 	for _, t := range translations {
-// 		id := gocql.TimeUUID()
-// 		// Insert into translations table
-// 		if err := session.Query(`INSERT INTO translations (id, key_id, value, entry_type, locale) VALUES (?, ?, ?, ?, ?)`,
-// 			id, t.keyID, t.value, t.entryType, t.locale).Exec(); err != nil {
-// 			log.Println("Insert error in translations table:", err)
-// 		}
-
-// 	}
-// 	fmt.Println("Seeding complete")
-// }
-
-// type Translation struct {
-// 	id        gocql.UUID
-// 	keyID     int
-// 	value     string
-// 	entryType string
-// 	locale    string
-// }
-
-// func queryTranslationsByEntryLocale(session *gocql.Session, entryType, locale string) []Translation {
-// 	var translations []Translation
-// 	var translation Translation
-
-// 	iter := session.Query(`SELECT id, key_id, value, entry_type, locale FROM translations_by_entry_locale WHERE entry_type = ? AND locale = ?`,
-// 		entryType, locale).Iter()
-
-// 	for iter.Scan(&translation.id, &translation.keyID, &translation.value, &translation.entryType, &translation.locale) {
-// 		t := translation
-// 		translations = append(translations, t)
-// 	}
-
-// 	if err := iter.Close(); err != nil {
-// 		log.Println("Query error:", err)
-// 	}
-
-// 	return translations
-// }
+func saveTranslationKey(session *gocql.Session, tk models.TranslationKey) {
+	if err := session.Query(`INSERT INTO translation_keys (name, entry_type) VALUES (?, ?)`,
+		tk.Name, tk.EntryType).Exec(); err != nil {
+		log.Println("Insert error in translation_keys table:", err)
+	}
+}
