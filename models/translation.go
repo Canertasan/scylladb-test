@@ -3,7 +3,8 @@ package models
 type Translation struct {
 	// ID        gocql.UUID
 	TranslationKeyName string
-	Value              string
+	RowValue           string
+	CalcValue          string
 	LocaleCode         string
 	EntryType          string
 	EntryID            string

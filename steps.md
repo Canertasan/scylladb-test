@@ -14,7 +14,8 @@ CREATE TABLE translation_keys (
 
 CREATE TABLE translations (
     translation_key_name TEXT,
-    value TEXT,
+    row_value TEXT,
+    calc_value TEXT,
     locale_code TEXT,
     entry_type TEXT,
     entry_id TEXT,
@@ -53,4 +54,10 @@ CREATE MATERIALIZED VIEW locales_by_country_code AS
     SELECT * FROM locales
     WHERE country_code IS NOT NULL
     PRIMARY KEY (country_code, code);
+
+
+CREATE MATERIALIZED VIEW locales_by_fallback AS
+    SELECT * FROM locales
+    WHERE fallback IS NOT NULL
+    PRIMARY KEY (fallback, code);
 ```
