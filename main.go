@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"scylladb-test/models"
+	"sync"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
@@ -56,23 +57,28 @@ func main() {
 	log.Printf("Consumer subscribed to topic %s", topic)
 
 	// Seed data
+	baseLocale := generateBaseLocale()
+	saveBaseLocale(session, baseLocale)
 	seedLocaleData(session)
-	seedTranslationAndTranslationKey(session, p)
 
-	b := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
+	// Seed a large number of translations
+	seedMultipleTranslations(session, p, 200000) // 200k translation_keys and 1.2M translations
+
+	b, duration := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
 
 	by, _ := json.MarshalIndent(b, "", "  ")
 	fmt.Printf("%s", by)
+	fmt.Printf("Query execution time: %s\n", duration)
 
 	consumeKafkaMessages(consumer, p, session)
 }
 
-func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) []models.Bundle {
+func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) ([]models.Bundle, time.Duration) {
 	var bundles []models.Bundle
 	var bundle models.Bundle
 	var translation models.MinimalTranslation
 
-	t := time.Now()
+	start := time.Now()
 	iter := session.Query(`SELECT translation_key_name, calc_value FROM translations_by_entry_type_locale_code WHERE entry_type = ? AND locale_code = ?`,
 		entryType, locale_code).Iter()
 
@@ -84,24 +90,37 @@ func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, local
 		}
 		bundles = append(bundles, bundle)
 	}
-	fmt.Println(time.Since(t))
+
+	duration := time.Since(start) // Calculate the duration after query execution
 
 	if err := iter.Close(); err != nil {
 		log.Println("Query error:", err)
 	}
 
-	return bundles
+	return bundles, duration
 }
 
 func seedLocaleData(session *gocql.Session) {
-	baseLocale := generateBaseLocale()
-	country := generateCountry()
-	language := generateLanguage()
-	locale := generateLocale(country, language)
-	saveBaseLocale(session, baseLocale)
-	saveCountry(session, country)
+	// Define one language
+	language := generateLanguage("en", "English", "English")
 	saveLanguage(session, language)
-	saveLocale(session, locale)
+
+	// Define multiple countries
+	countries := []models.Country{
+		generateCountry("NL", "Netherlands", "Nederland", "en-NL", "EUR", false),
+		generateCountry("US", "United States", "United States", "en-US", "USD", false),
+		generateCountry("GB", "United Kingdom", "United Kingdom", "en-GB", "GBP", false),
+		generateCountry("CA", "Canada", "Canada", "en-CA", "CAD", false),
+		generateCountry("AU", "Australia", "Australia", "en-AU", "AUD", false),
+	}
+
+	for _, country := range countries {
+		saveCountry(session, country)
+
+		// Generate and save the locale for each country-language combination
+		locale := generateLocale(country, language)
+		saveLocale(session, locale)
+	}
 }
 
 func generateBaseLocale() models.Locale {
@@ -110,22 +129,22 @@ func generateBaseLocale() models.Locale {
 	}
 }
 
-func generateCountry() models.Country {
+func generateCountry(code string, title string, titleLocale string, defaultLocale string, currency string, isDisabled bool) models.Country {
 	return models.Country{
-		Code:          "NL",
-		Title:         "Netherlands",
-		TitleLocal:    "Nederland",
-		DefaultLocale: "en-NL",
-		Currency:      "EUR",
-		IsDisabled:    false,
+		Code:          code,
+		Title:         title,
+		TitleLocal:    titleLocale,
+		DefaultLocale: defaultLocale,
+		Currency:      currency,
+		IsDisabled:    isDisabled,
 	}
 }
 
-func generateLanguage() models.Language {
+func generateLanguage(code string, title string, titleLocale string) models.Language {
 	return models.Language{
-		Code:       "en",
-		Title:      "English",
-		TitleLocal: "English",
+		Code:       code,
+		Title:      title,
+		TitleLocal: titleLocale,
 	}
 }
 
@@ -166,27 +185,60 @@ func saveLocale(session *gocql.Session, locale models.Locale) {
 	}
 }
 
-func seedTranslationAndTranslationKey(session *gocql.Session, p *kafka.Producer) {
-	tk := generateTranslationKey()
-	createTranslationKey(session, tk)
+func seedMultipleTranslations(session *gocql.Session, p *kafka.Producer, count int) {
+	// Start a timer to measure seeding duration
+	start := time.Now()
 
-	t := generateBaseTranslation(tk)
-	updateTranslation(session, p, t)
+	// Create a WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Set the number of workers (concurrent goroutines)
+	numWorkers := 10
+	wg.Add(numWorkers)
+
+	// Channel to distribute work
+	jobs := make(chan int, count)
+
+	// Start workers
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				// Generate and insert a translation
+				tk := generateTranslationKey(job)
+				createTranslationKey(session, tk)
+				t := generateBaseTranslation(tk, job)
+				updateTranslation(session, p, t)
+			}
+		}()
+	}
+
+	// Enqueue jobs
+	for i := 0; i < count; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	wg.Wait()
+
+	// Print the duration of the seeding process
+	log.Printf("Seeding completed in %s\n", time.Since(start))
 }
 
-func generateTranslationKey() models.TranslationKey {
+func generateTranslationKey(jobID int) models.TranslationKey {
 	return models.TranslationKey{
-		Name:      "CATALOG_RULES",
-		EntryType: "11",
+		Name:      fmt.Sprintf("TRANSLATION_KEY_%d", jobID),
+		EntryType: "11", // or change it dynamically if needed
 	}
 }
 
-func generateBaseTranslation(tk models.TranslationKey) models.Translation {
+func generateBaseTranslation(tk models.TranslationKey, jobID int) models.Translation {
 	return models.Translation{
 		TranslationKeyName: tk.Name,
-		RowValue:           "CATALOG_RULES BASE",
-		CalcValue:          "CATALOG_RULES BASE",
-		LocaleCode:         "en",
+		RowValue:           fmt.Sprintf("TRANSLATION_%d BASE", jobID),
+		CalcValue:          fmt.Sprintf("TRANSLATION_%d BASE", jobID),
+		LocaleCode:         "en", // or use a dynamic locale code if needed
 		EntryType:          tk.EntryType,
 	}
 }
@@ -196,41 +248,18 @@ func createTranslationKey(session *gocql.Session, tk models.TranslationKey) {
 		tk.Name, tk.EntryType).Exec(); err != nil {
 		log.Println("Insert error in translation_keys table:", err)
 	}
-	createEmptyTranslationsForAllLocale(session, tk)
-}
-
-func createEmptyTranslationsForAllLocale(session *gocql.Session, tk models.TranslationKey) {
-	var locales []models.Locale
-	iter := session.Query(`SELECT country_code, language_code, code, fallback FROM locales`).Iter()
-
-	for {
-		var locale models.Locale
-		if !iter.Scan(&locale.CountryCode, &locale.LanguageCode, &locale.Code, &locale.Fallback) {
-			break
-		}
-		locales = append(locales, locale)
-	}
-	if err := iter.Close(); err != nil {
-		log.Println("Query error:", err)
-	}
-
-	for _, locale := range locales {
-		if err := session.Query(`INSERT INTO translations (entry_type, locale_code, translation_key_name, calc_value) VALUES (?, ?, ?, ?)`,
-			tk.EntryType, locale.Code, tk.Name, "").Exec(); err != nil {
-			log.Println("Insert error in translations table:", err)
-		}
-	}
 }
 
 func updateTranslation(session *gocql.Session, p *kafka.Producer, t models.Translation) {
 	// Ensure calcValue matches rowValue if rowValue is not empty
 	if t.RowValue != "" && t.CalcValue != t.RowValue {
 		t.CalcValue = t.RowValue
+		// raise an errors
 	}
 
 	// Attempt to update the translation in the database
-	err := session.Query(`UPDATE translations SET row_value = ?, calc_value = ? WHERE translation_key_name = ? AND locale_code = ?`,
-		t.RowValue, t.CalcValue, t.TranslationKeyName, t.LocaleCode).Exec()
+	err := session.Query(`UPDATE translations SET row_value = ?, calc_value = ?, entry_type = ? WHERE translation_key_name = ? AND locale_code = ?`,
+		t.RowValue, t.CalcValue, t.EntryType, t.TranslationKeyName, t.LocaleCode).Exec()
 	if err != nil {
 		log.Printf("Update error in translations table: %v", err)
 		return // Skip Kafka push if save failed
@@ -273,18 +302,36 @@ func updateTranslation(session *gocql.Session, p *kafka.Producer, t models.Trans
 
 	log.Printf("Fallback translations: %v", childTranslations)
 
-	// Push message to Kafka for each fallback code to update child translations
-	for _, childTranslation := range childTranslations {
-		if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
-			log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
-			// update calculated value
-			childTranslation.CalcValue = t.RowValue
-			pushKafkaMessage(p, childTranslation)
-		} else {
-			if childTranslation.RowValue != "" {
-				log.Printf("Skipping update child translation since row value is not empty")
-			} else if childTranslation.CalcValue == t.CalcValue {
-				log.Printf("Skipping update child translation since calc value is the same")
+	// if no child translations found, create new translations
+	if len(childTranslations) == 0 && len(fallbackCodes) > 0 {
+		// create new translations
+		for _, code := range fallbackCodes {
+			// create new translation
+			newTranslation := models.Translation{
+				TranslationKeyName: t.TranslationKeyName,
+				RowValue:           t.CalcValue,
+				CalcValue:          t.CalcValue,
+				LocaleCode:         code,
+				EntryType:          t.EntryType,
+			}
+			// push to kafka
+			pushKafkaMessage(p, newTranslation)
+		}
+	} else {
+		// if child translations found, update them
+		// Push message to Kafka for each fallback code to update child translations
+		for _, childTranslation := range childTranslations {
+			if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
+				log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
+				// update calculated value
+				childTranslation.CalcValue = t.RowValue
+				pushKafkaMessage(p, childTranslation)
+			} else {
+				if childTranslation.RowValue != "" {
+					log.Printf("Skipping update child translation since row value is not empty")
+				} else if childTranslation.CalcValue == t.CalcValue {
+					log.Printf("Skipping update child translation since calc value is the same")
+				}
 			}
 		}
 	}
