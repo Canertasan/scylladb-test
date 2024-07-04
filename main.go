@@ -24,54 +24,59 @@ func main() {
 	}
 	defer session.Close()
 
-	// Kafka Setup
-	log.Println("Connecting to Kafka...")
-	// Producer
-	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9094"})
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer p.Close()
-	log.Println("Kafka Producer created.")
+	// // Kafka Setup
+	// log.Println("Connecting to Kafka...")
+	// // Producer
+	// p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9094"})
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer p.Close()
+	// log.Println("Kafka Producer created.")
 
-	// Consumer
-	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9094",
-		"group.id":          "example_group",
-		"auto.offset.reset": "earliest", // Start reading from the earliest message
-	})
+	// // Consumer
+	// consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
+	// 	"bootstrap.servers": "localhost:9094",
+	// 	"group.id":          "example_group",
+	// 	"auto.offset.reset": "earliest", // Start reading from the earliest message
+	// })
 
-	if err != nil {
-		log.Fatalf("Failed to create consumer: %s", err)
-	}
+	// if err != nil {
+	// 	log.Fatalf("Failed to create consumer: %s", err)
+	// }
 
-	defer consumer.Close()
-	log.Println("Kafka Consumer created.")
+	// defer consumer.Close()
+	// log.Println("Kafka Consumer created.")
 
-	// Subscribe
-	topic := "update_child_translations"
-	err = consumer.Subscribe(topic, nil)
-	if err != nil {
-		log.Fatalf("Failed to subscribe to topic: %s", err)
-	}
+	// // Subscribe
+	// topic := "update_child_translations"
+	// err = consumer.Subscribe(topic, nil)
+	// if err != nil {
+	// 	log.Fatalf("Failed to subscribe to topic: %s", err)
+	// }
 
-	log.Printf("Consumer subscribed to topic %s", topic)
+	// log.Printf("Consumer subscribed to topic %s", topic)
 
-	// Seed data
-	baseLocale := generateBaseLocale()
-	saveBaseLocale(session, baseLocale)
-	seedLocaleData(session)
+	// // Seed data
+	// baseLocale := generateBaseLocale()
+	// saveBaseLocale(session, baseLocale)
+	// seedLocaleData(session)
 
 	// Seed a large number of translations
-	seedMultipleTranslations(session, p, 10000) // 10k translation_keys and 60k translations
+	// seedMultipleTranslations(session, p, 10000) // 10k translation_keys and 60k translations
 
-	b, duration := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
+	entry_type := "12"
+	locale_code := "en-GB"
 
-	by, _ := json.MarshalIndent(b, "", "  ")
-	fmt.Printf("%s", by)
+	b, duration := queryTranslationsByEntryLocaleCode(session, entry_type, locale_code)
+
+	// by, _ := json.MarshalIndent(b, "", "  ")
+	// fmt.Printf("%s", by)
 	fmt.Printf("Query execution time: %s\n", duration)
+	fmt.Printf("Query parameters: entry_type = %s, locale_code = %s\n", entry_type, locale_code)
+	fmt.Print("Number of bundles: ", len(b), "\n")
 
-	consumeKafkaMessages(consumer, p, session)
+	// consumeKafkaMessages(consumer, p, session)
 }
 
 func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) ([]models.Bundle, time.Duration) {
