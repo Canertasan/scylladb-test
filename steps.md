@@ -2,62 +2,45 @@
 - docker-compose exec scylla cqlsh
 
 ```sql
-CREATE KEYSPACE localisation WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
-
-USE localisation;
-
 CREATE TABLE translation_keys (
-    name TEXT,
-    entry_type TEXT,
-    PRIMARY KEY (name)
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100),
+    entry_type VARCHAR(10)
 );
 
 CREATE TABLE translations (
-    translation_key_name TEXT,
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    translation_key_id INT,
     row_value TEXT,
     calc_value TEXT,
-    locale_code TEXT,
-    entry_type TEXT,
-    entry_id TEXT,
-    PRIMARY KEY (translation_key_name, locale_code)
+    locale_code VARCHAR(50),
+    FOREIGN KEY (translation_key_id) REFERENCES translation_keys(id)
 );
 
-CREATE MATERIALIZED VIEW translations_by_entry_type_locale_code AS
-    SELECT * FROM translations
-    WHERE entry_type IS NOT NULL AND locale_code IS NOT NULL 
-    PRIMARY KEY ((entry_type, locale_code), translation_key_name);
-
-
 CREATE TABLE countries (
-    code TEXT PRIMARY KEY,
-    title TEXT,
-    title_local TEXT,
-    default_locale TEXT,
-    currency TEXT,
-    is_disabled BOOLEAN,
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(10) UNIQUE NOT NULL,
+    title VARCHAR(100) NOT NULL,
+    title_local VARCHAR(100),
+    default_locale VARCHAR(10),
+    currency VARCHAR(50),
+    is_disabled BOOLEAN NOT NULL
 );
 
 CREATE TABLE languages (
-    code TEXT PRIMARY KEY,
-    title TEXT,
-    title_local TEXT,
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(10) UNIQUE NOT NULL,
+    title VARCHAR(100) NOT NULL,
+    title_local VARCHAR(100)
 );
 
 CREATE TABLE locales (
-    code TEXT PRIMARY KEY,
-    country_code TEXT,
-    language_code TEXT,
-    fallback TEXT,
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(10) UNIQUE NOT NULL,
+    country_code VARCHAR(10) NOT NULL,
+    language_code VARCHAR(10) NOT NULL,
+    fallback VARCHAR(10),
+    FOREIGN KEY (country_code) REFERENCES countries(code),
+    FOREIGN KEY (language_code) REFERENCES languages(code)
 );
-
-CREATE MATERIALIZED VIEW locales_by_country_code AS
-    SELECT * FROM locales
-    WHERE country_code IS NOT NULL
-    PRIMARY KEY (country_code, code);
-
-
-CREATE MATERIALIZED VIEW locales_by_fallback AS
-    SELECT * FROM locales
-    WHERE fallback IS NOT NULL
-    PRIMARY KEY (fallback, code);
 ```

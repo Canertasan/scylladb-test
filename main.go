@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,101 +11,130 @@ import (
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
-	"github.com/gocql/gocql"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 func main() {
-	// Connect to ScyllaDB
-	cluster := gocql.NewCluster("127.0.0.1")
-	cluster.Keyspace = "localisation"
-	cluster.Consistency = gocql.Quorum
-	session, err := cluster.CreateSession()
+	// Connect to MySQL
+	dsn := "root:@tcp(127.0.0.1:3306)/localisation"
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Fatal("Unable to connect to ScyllaDB:", err)
+		log.Fatal("Unable to connect to MySQL:", err)
 	}
-	defer session.Close()
+	defer db.Close()
+
+	// Verify connection to the database
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("Unable to ping the database:", err)
+	}
 
 	// Kafka Setup
 	log.Println("Connecting to Kafka...")
 	// Producer
-	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9094"})
+	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost:9092"})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer p.Close()
 	log.Println("Kafka Producer created.")
 
-	// Consumer
-	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9094",
-		"group.id":          "example_group",
-		"auto.offset.reset": "earliest", // Start reading from the earliest message
-	})
+	// // Consumer
+	// consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
+	// 	"bootstrap.servers": "localhost:9092",
+	// 	"group.id":          "example_group",
+	// 	"auto.offset.reset": "earliest", // Start reading from the earliest message
+	// })
 
-	if err != nil {
-		log.Fatalf("Failed to create consumer: %s", err)
-	}
+	// if err != nil {
+	// 	log.Fatalf("Failed to create consumer: %s", err)
+	// }
 
-	defer consumer.Close()
-	log.Println("Kafka Consumer created.")
+	// defer consumer.Close()
+	// log.Println("Kafka Consumer created.")
 
-	// Subscribe
-	topic := "update_child_translations"
-	err = consumer.Subscribe(topic, nil)
-	if err != nil {
-		log.Fatalf("Failed to subscribe to topic: %s", err)
-	}
+	// // Subscribe
+	// topic := "update_child_translations"
+	// err = consumer.Subscribe(topic, nil)
+	// if err != nil {
+	// 	log.Fatalf("Failed to subscribe to topic: %s", err)
+	// }
 
-	log.Printf("Consumer subscribed to topic %s", topic)
+	// log.Printf("Consumer subscribed to topic %s", topic)
 
-	// Seed data
-	baseLocale := generateBaseLocale()
-	saveBaseLocale(session, baseLocale)
-	seedLocaleData(session)
+	// // Seed data
+	// baseLocale := generateBaseLocale()
+	// saveLocale(db, baseLocale)
+	// seedLocaleData(db)
 
 	// Seed a large number of translations
-	seedMultipleTranslations(session, p, 10000) // 10k translation_keys and 60k translations
+	// seedMultipleTranslations(db, p, 10000) // 10k translation_keys and 60k translations
 
-	b, duration := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
+	bundles, duration := queryTranslationsByEntryLocaleCode(db, "11", "en-NL")
 
-	by, _ := json.MarshalIndent(b, "", "  ")
-	fmt.Printf("%s", by)
+	bundlesJson, _ := json.MarshalIndent(bundles, "", "  ")
+	fmt.Printf("%s", bundlesJson)
 	fmt.Printf("Query execution time: %s\n", duration)
 
-	consumeKafkaMessages(consumer, p, session)
+	// consumeKafkaMessages(consumer, p, db)
 }
 
-func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) ([]models.Bundle, time.Duration) {
+func queryTranslationsByEntryLocaleCode(db *sql.DB, entryType, localeCode string) ([]models.Bundle, time.Duration) {
 	var bundles []models.Bundle
-	var bundle models.Bundle
 	var translation models.MinimalTranslation
+	translationMap := make(map[string]*models.Bundle)
 
 	start := time.Now()
-	iter := session.Query(`SELECT translation_key_name, calc_value FROM translations_by_entry_type_locale_code WHERE entry_type = ? AND locale_code = ?`,
-		entryType, locale_code).Iter()
-
-	for iter.Scan(&translation.TranslationKeyName, &translation.Value) {
-		bundle = models.Bundle{
-			EntryType:    entryType,
-			LocaleCode:   locale_code,
-			Translations: []models.MinimalTranslation{translation},
-		}
-		bundles = append(bundles, bundle)
+	rows, err := db.Query(`
+		SELECT tk.name, t.calc_value
+		FROM translations t
+		JOIN translation_keys tk ON t.translation_key_id = tk.id
+		WHERE tk.entry_type = ? AND t.locale_code = ?
+	`, entryType, localeCode)
+	if err != nil {
+		log.Fatal("Query error:", err)
 	}
+	defer rows.Close()
 
+	for rows.Next() {
+		var keyName, value string
+		if err := rows.Scan(&keyName, &value); err != nil {
+			log.Fatal("Scan error:", err)
+		}
+
+		translation = models.MinimalTranslation{
+			TranslationKeyName: keyName,
+			Value:              value,
+		}
+
+		if bundle, exists := translationMap[entryType]; exists {
+			bundle.Translations = append(bundle.Translations, translation)
+		} else {
+			bundle := &models.Bundle{
+				EntryType:    entryType,
+				LocaleCode:   localeCode,
+				Translations: []models.MinimalTranslation{translation},
+			}
+			translationMap[entryType] = bundle
+		}
+	}
 	duration := time.Since(start) // Calculate the duration after query execution
 
-	if err := iter.Close(); err != nil {
-		log.Println("Query error:", err)
+	if err := rows.Err(); err != nil {
+		log.Fatal("Rows error:", err)
+	}
+
+	for _, bundle := range translationMap {
+		bundles = append(bundles, *bundle)
 	}
 
 	return bundles, duration
 }
 
-func seedLocaleData(session *gocql.Session) {
+func seedLocaleData(db *sql.DB) {
 	// Define one language
 	language := generateLanguage("en", "English", "English")
-	saveLanguage(session, language)
+	saveLanguage(db, language)
 
 	// Define multiple countries
 	countries := []models.Country{
@@ -116,11 +146,11 @@ func seedLocaleData(session *gocql.Session) {
 	}
 
 	for _, country := range countries {
-		saveCountry(session, country)
+		saveCountry(db, country)
 
 		// Generate and save the locale for each country-language combination
 		locale := generateLocale(country, language)
-		saveLocale(session, locale)
+		saveLocale(db, locale)
 	}
 }
 
@@ -158,35 +188,31 @@ func generateLocale(country models.Country, language models.Language) models.Loc
 	}
 }
 
-func saveBaseLocale(session *gocql.Session, baseLocale models.Locale) {
-	if err := session.Query(`INSERT INTO locales (country_code, language_code, code, fallback) VALUES (?, ?, ?, ?)`,
-		baseLocale.CountryCode, baseLocale.LanguageCode, baseLocale.Code, baseLocale.Fallback).Exec(); err != nil {
-		log.Println("Insert error in locales table:", err)
-	}
-}
-
-func saveCountry(session *gocql.Session, country models.Country) {
-	if err := session.Query(`INSERT INTO countries (code, title, title_local, default_locale, currency, is_disabled) VALUES (?, ?, ?, ?, ?, ?)`,
-		country.Code, country.Title, country.TitleLocal, country.DefaultLocale, country.Currency, country.IsDisabled).Exec(); err != nil {
+func saveCountry(db *sql.DB, country models.Country) {
+	_, err := db.Exec(`INSERT INTO countries (code, title, title_local, default_locale, currency, is_disabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		country.Code, country.Title, country.TitleLocal, country.DefaultLocale, country.Currency, country.IsDisabled)
+	if err != nil {
 		log.Println("Insert error in countries table:", err)
 	}
 }
 
-func saveLanguage(session *gocql.Session, language models.Language) {
-	if err := session.Query(`INSERT INTO languages (code, title, title_local) VALUES (?, ?, ?)`,
-		language.Code, language.Title, language.TitleLocal).Exec(); err != nil {
+func saveLanguage(db *sql.DB, language models.Language) {
+	_, err := db.Exec(`INSERT INTO languages (code, title, title_local) VALUES (?, ?, ?)`,
+		language.Code, language.Title, language.TitleLocal)
+	if err != nil {
 		log.Println("Insert error in languages table:", err)
 	}
 }
 
-func saveLocale(session *gocql.Session, locale models.Locale) {
-	if err := session.Query(`INSERT INTO locales (country_code, language_code, code, fallback) VALUES (?, ?, ?, ?)`,
-		locale.CountryCode, locale.LanguageCode, locale.Code, locale.Fallback).Exec(); err != nil {
+func saveLocale(db *sql.DB, locale models.Locale) {
+	_, err := db.Exec(`INSERT INTO locales (country_code, language_code, code, fallback) VALUES (?, ?, ?, ?)`,
+		locale.CountryCode, locale.LanguageCode, locale.Code, locale.Fallback)
+	if err != nil {
 		log.Println("Insert error in locales table:", err)
 	}
 }
 
-func seedMultipleTranslations(session *gocql.Session, p *kafka.Producer, count int) {
+func seedMultipleTranslations(db *sql.DB, p *kafka.Producer, count int) {
 	// Start a timer to measure seeding duration
 	start := time.Now()
 
@@ -207,9 +233,11 @@ func seedMultipleTranslations(session *gocql.Session, p *kafka.Producer, count i
 			for job := range jobs {
 				// Generate and insert a translation
 				tk := generateTranslationKey(job)
-				createTranslationKey(session, tk)
+				tk = createTranslationKey(db, tk)
+				// tkMas, _ := json.MarshalIndent(tk, "", "  ")
+				// fmt.Printf("%s", tkMas)
 				t := generateBaseTranslation(tk, job)
-				updateTranslation(session, p, t)
+				updateTranslation(db, p, t)
 			}
 		}()
 	}
@@ -237,11 +265,11 @@ func generateTranslationKey(jobID int) models.TranslationKey {
 func generateBaseTranslation(tk models.TranslationKey, jobID int) models.Translation {
 	value := randomText(5000)
 	return models.Translation{
-		TranslationKeyName: tk.Name,
-		RowValue:           value,
-		CalcValue:          value,
-		LocaleCode:         "en", // or use a dynamic locale code if needed
-		EntryType:          tk.EntryType,
+		TranslationKeyID: tk.ID,
+		TranslationKey:   tk,
+		RowValue:         value,
+		CalcValue:        value,
+		LocaleCode:       "en-NL", // or use a dynamic locale code if needed
 	}
 }
 
@@ -260,98 +288,127 @@ func randomText(maxLength int) string {
 	return string(b)
 }
 
-func createTranslationKey(session *gocql.Session, tk models.TranslationKey) {
-	if err := session.Query(`INSERT INTO translation_keys (name, entry_type) VALUES (?, ?)`,
-		tk.Name, tk.EntryType).Exec(); err != nil {
+func createTranslationKey(db *sql.DB, tk models.TranslationKey) models.TranslationKey {
+	result, err := db.Exec(`INSERT INTO translation_keys (name, entry_type) VALUES (?, ?)`,
+		tk.Name, tk.EntryType)
+	if err != nil {
 		log.Println("Insert error in translation_keys table:", err)
+		return tk // Return the original tk on error
 	}
+
+	lastInsertID, err := result.LastInsertId()
+	if err != nil {
+		log.Println("Error getting last insert ID:", err)
+		return tk // Return the original tk on error
+	}
+
+	tk.ID = uint(lastInsertID) // Convert lastInsertID to uint before assigning it to tk.ID
+	return tk
 }
 
-func updateTranslation(session *gocql.Session, p *kafka.Producer, t models.Translation) {
+func updateTranslation(db *sql.DB, p *kafka.Producer, t models.Translation) {
 	// Ensure calcValue matches rowValue if rowValue is not empty
 	if t.RowValue != "" && t.CalcValue != t.RowValue {
 		t.CalcValue = t.RowValue
 		// raise an errors
 	}
-
-	// Attempt to update the translation in the database
-	err := session.Query(`UPDATE translations SET row_value = ?, calc_value = ?, entry_type = ? WHERE translation_key_name = ? AND locale_code = ?`,
-		t.RowValue, t.CalcValue, t.EntryType, t.TranslationKeyName, t.LocaleCode).Exec()
+	// tMas, _ := json.MarshalIndent(t, "", "  ")
+	// fmt.Printf("%s", tMas)
+	// Attempt to perform an upsert operation in the database
+	_, err := db.Exec(`
+	INSERT INTO translations (translation_key_id, locale_code, row_value, calc_value)
+	VALUES (?, ?, ?, ?)
+	ON DUPLICATE KEY UPDATE
+	row_value = VALUES(row_value),
+	calc_value = VALUES(calc_value)`,
+		t.TranslationKeyID, t.LocaleCode, t.RowValue, t.CalcValue)
 	if err != nil {
-		log.Printf("Update error in translations table: %v", err)
+		log.Printf("Upsert error in translations table: %v", err)
 		return // Skip Kafka push if save failed
 	}
 
-	// Query to fetch fallback locale codes
-	var fallbackCodes []string
-	iter := session.Query(`SELECT code FROM locales_by_fallback WHERE fallback = ?`, t.LocaleCode).Iter()
-	defer iter.Close() // Ensure iterator is closed
+	// // Query to fetch fallback locale codes
+	// var fallbackCodes []string
+	// rows, err := db.Query(`SELECT code FROM locales WHERE fallback = ?`, t.LocaleCode)
+	// if err != nil {
+	// 	log.Fatal("Query error:", err)
+	// }
+	// defer rows.Close()
 
-	var code string
-	for iter.Scan(&code) {
-		fallbackCodes = append(fallbackCodes, code)
-	}
-	if err = iter.Close(); err != nil {
-		log.Printf("Query iterator error: %v", err)
-		return
-	}
+	// var code string
+	// for rows.Next() {
+	// 	if err := rows.Scan(&code); err != nil {
+	// 		log.Fatal("Scan error:", err)
+	// 	}
+	// 	fallbackCodes = append(fallbackCodes, code)
+	// }
 
-	// If no fallback codes were found, return early
-	if len(fallbackCodes) == 0 {
-		return
-	}
+	// if err := rows.Err(); err != nil {
+	// 	log.Fatal("Rows error:", err)
+	// }
 
-	log.Printf("Fallback codes: %v", fallbackCodes)
+	// // If no fallback codes were found, return early
+	// if len(fallbackCodes) == 0 {
+	// 	return
+	// }
 
-	// Select all translations with the same translation key name and any of the fallback locale codes
-	iter = session.Query(`SELECT entry_type, locale_code, translation_key_name, row_value, calc_value FROM translations WHERE translation_key_name = ? AND locale_code IN ?`,
-		t.TranslationKeyName, fallbackCodes).Iter()
-	defer iter.Close() // Ensure iterator is closed
+	// log.Printf("Fallback codes: %v", fallbackCodes)
 
-	var childTranslations []models.Translation
-	var tempTranslation models.Translation
-	for iter.Scan(&tempTranslation.EntryType, &tempTranslation.LocaleCode, &tempTranslation.TranslationKeyName, &tempTranslation.RowValue, &tempTranslation.CalcValue) {
-		childTranslations = append(childTranslations, tempTranslation)
-	}
-	if err = iter.Close(); err != nil {
-		log.Printf("Query error: %v", err)
-	}
+	// // Select all translations with the same translation key name and any of the fallback locale codes
+	// rows, err = db.Query(`SELECT locale_code, translation_key_ID, row_value, calc_value FROM translations WHERE translation_key_id = ? AND locale_code IN (?)`,
+	// 	t.TranslationKey.ID, fallbackCodes)
+	// if err != nil {
+	// 	log.Fatal("Query error:", err)
+	// }
+	// defer rows.Close()
 
-	log.Printf("Fallback translations: %v", childTranslations)
+	// var childTranslations []models.Translation
+	// var tempTranslation models.Translation
+	// for rows.Next() {
+	// 	if err := rows.Scan(&tempTranslation.LocaleCode, &tempTranslation.TranslationKey.Name, &tempTranslation.RowValue, &tempTranslation.CalcValue); err != nil {
+	// 		log.Fatal("Scan error:", err)
+	// 	}
+	// 	childTranslations = append(childTranslations, tempTranslation)
+	// }
 
-	// if no child translations found, create new translations
-	if len(childTranslations) == 0 && len(fallbackCodes) > 0 {
-		// create new translations
-		for _, code := range fallbackCodes {
-			// create new translation
-			newTranslation := models.Translation{
-				TranslationKeyName: t.TranslationKeyName,
-				RowValue:           t.CalcValue,
-				CalcValue:          t.CalcValue,
-				LocaleCode:         code,
-				EntryType:          t.EntryType,
-			}
-			// push to kafka
-			pushKafkaMessage(p, newTranslation)
-		}
-	} else {
-		// if child translations found, update them
-		// Push message to Kafka for each fallback code to update child translations
-		for _, childTranslation := range childTranslations {
-			if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
-				log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
-				// update calculated value
-				childTranslation.CalcValue = t.RowValue
-				pushKafkaMessage(p, childTranslation)
-			} else {
-				if childTranslation.RowValue != "" {
-					log.Printf("Skipping update child translation since row value is not empty")
-				} else if childTranslation.CalcValue == t.CalcValue {
-					log.Printf("Skipping update child translation since calc value is the same")
-				}
-			}
-		}
-	}
+	// if err := rows.Err(); err != nil {
+	// 	log.Fatal("Rows error:", err)
+	// }
+
+	// log.Printf("Fallback translations: %v", childTranslations)
+
+	// // if no child translations found, create new translations
+	// if len(childTranslations) == 0 && len(fallbackCodes) > 0 {
+	// 	// create new translations
+	// 	for _, code := range fallbackCodes {
+	// 		// create new translation
+	// 		newTranslation := models.Translation{
+	// 			TranslationKeyID: t.TranslationKeyID,
+	// 			RowValue:         t.CalcValue,
+	// 			CalcValue:        t.CalcValue,
+	// 			LocaleCode:       code,
+	// 		}
+	// 		// push to kafka
+	// 		pushKafkaMessage(p, newTranslation)
+	// 	}
+	// } else {
+	// 	// if child translations found, update them
+	// 	// Push message to Kafka for each fallback code to update child translations
+	// 	for _, childTranslation := range childTranslations {
+	// 		if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
+	// 			log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
+	// 			// update calculated value
+	// 			childTranslation.CalcValue = t.RowValue
+	// 			pushKafkaMessage(p, childTranslation)
+	// 		} else {
+	// 			if childTranslation.RowValue != "" {
+	// 				log.Printf("Skipping update child translation since row value is not empty")
+	// 			} else if childTranslation.CalcValue == t.CalcValue {
+	// 				log.Printf("Skipping update child translation since calc value is the same")
+	// 			}
+	// 		}
+	// 	}
+	// }
 }
 
 func pushKafkaMessage(p *kafka.Producer, translation models.Translation) {
@@ -364,7 +421,7 @@ func pushKafkaMessage(p *kafka.Producer, translation models.Translation) {
 
 	err = p.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-		Key:            []byte(translation.TranslationKeyName),
+		Key:            []byte(translation.TranslationKey.Name),
 		Value:          translationBytes,
 	}, nil)
 	if err != nil {
@@ -372,7 +429,7 @@ func pushKafkaMessage(p *kafka.Producer, translation models.Translation) {
 	}
 }
 
-func consumeKafkaMessages(consumer *kafka.Consumer, producer *kafka.Producer, session *gocql.Session) {
+func consumeKafkaMessages(consumer *kafka.Consumer, producer *kafka.Producer, db *sql.DB) {
 	// Consume messages
 	log.Println("Starting to consume Kafka messages...")
 	for {
@@ -393,7 +450,7 @@ func consumeKafkaMessages(consumer *kafka.Consumer, producer *kafka.Producer, se
 		}
 		log.Printf("Received message: translation = %s", translation)
 
-		updateTranslation(session, producer, translation)
+		updateTranslation(db, producer, translation)
 		log.Printf("Processed message:  translation = %s", translation)
 	}
 }
