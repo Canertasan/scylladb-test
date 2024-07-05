@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"scylladb-test/models"
 	"sync"
 	"time"
@@ -62,7 +63,7 @@ func main() {
 	seedLocaleData(session)
 
 	// Seed a large number of translations
-	seedMultipleTranslations(session, p, 200000) // 200k translation_keys and 1.2M translations
+	seedMultipleTranslations(session, p, 10000) // 10k translation_keys and 60k translations
 
 	b, duration := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
 
@@ -234,13 +235,29 @@ func generateTranslationKey(jobID int) models.TranslationKey {
 }
 
 func generateBaseTranslation(tk models.TranslationKey, jobID int) models.Translation {
+	value := randomText(5000)
 	return models.Translation{
 		TranslationKeyName: tk.Name,
-		RowValue:           fmt.Sprintf("TRANSLATION_%d BASE", jobID),
-		CalcValue:          fmt.Sprintf("TRANSLATION_%d BASE", jobID),
+		RowValue:           value,
+		CalcValue:          value,
 		LocaleCode:         "en", // or use a dynamic locale code if needed
 		EntryType:          tk.EntryType,
 	}
+}
+
+// Function to generate random text of random length up to maxLength
+func randomText(maxLength int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// Generate a random length in the range [1, maxLength+1)
+	length := seededRand.Intn(maxLength) + 1
+
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+	return string(b)
 }
 
 func createTranslationKey(session *gocql.Session, tk models.TranslationKey) {
