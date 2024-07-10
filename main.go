@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"scylladb-test/models"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,21 +59,34 @@ func main() {
 
 	log.Printf("Consumer subscribed to topic %s", topic)
 
-	// Seed data
-	baseLocale := generateBaseLocale()
-	saveBaseLocale(session, baseLocale)
-	seedLocaleData(session)
+	// // Seed data
+	// baseLocale := generateBaseLocale()
+	// saveBaseLocale(session, baseLocale)
+	// seedLocaleData(session)
 
-	// Seed a large number of translations
-	seedMultipleTranslations(session, p, 10000) // 10k translation_keys and 60k translations
+	// //Seed a large number of translations
+	// seedMultipleTranslations(session, p, 20000) // 20k translation_keys and 220k translations
 
-	b, duration := queryTranslationsByEntryLocaleCode(session, "11", "en-NL")
+	// Perform benchmarking
+	const numWorkers = 60
+	const ratePerSecond = 60 // 60 requests per second per worker
+	var wg sync.WaitGroup
 
-	by, _ := json.MarshalIndent(b, "", "  ")
-	fmt.Printf("%s", by)
-	fmt.Printf("Query execution time: %s\n", duration)
+	jobs := make(chan int, numWorkers)
 
-	consumeKafkaMessages(consumer, p, session)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initialize workers and rate limiter
+	initializeWorkers(ctx, session, numWorkers, ratePerSecond, jobs, &wg)
+
+	// Create and enqueue jobs for benchmarking
+	enqueueJobs(jobs, numWorkers*5) // Adjust the number of jobs as needed
+
+	wg.Wait()
+	fmt.Println("All benchmarking jobs completed.")
+
+	// consumeKafkaMessages(consumer, p, session)
 }
 
 func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, locale_code string) ([]models.Bundle, time.Duration) {
@@ -82,7 +97,7 @@ func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, local
 	start := time.Now()
 	iter := session.Query(`SELECT translation_key_name, calc_value FROM translations_by_entry_type_locale_code WHERE entry_type = ? AND locale_code = ?`,
 		entryType, locale_code).Iter()
-
+	duration := time.Since(start) // Calculate the duration after query execution
 	for iter.Scan(&translation.TranslationKeyName, &translation.Value) {
 		bundle = models.Bundle{
 			EntryType:    entryType,
@@ -92,8 +107,6 @@ func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, local
 		bundles = append(bundles, bundle)
 	}
 
-	duration := time.Since(start) // Calculate the duration after query execution
-
 	if err := iter.Close(); err != nil {
 		log.Println("Query error:", err)
 	}
@@ -101,26 +114,139 @@ func queryTranslationsByEntryLocaleCode(session *gocql.Session, entryType, local
 	return bundles, duration
 }
 
-func seedLocaleData(session *gocql.Session) {
-	// Define one language
-	language := generateLanguage("en", "English", "English")
-	saveLanguage(session, language)
+// Function to create and enqueue jobs
+func enqueueJobs(jobs chan<- int, numJobs int) {
+	for j := 0; j < numJobs; j++ {
+		jobs <- j
+	}
+	close(jobs) // Close the jobs channel when done
+}
 
-	// Define multiple countries
-	countries := []models.Country{
-		generateCountry("NL", "Netherlands", "Nederland", "en-NL", "EUR", false),
-		generateCountry("US", "United States", "United States", "en-US", "USD", false),
-		generateCountry("GB", "United Kingdom", "United Kingdom", "en-GB", "GBP", false),
-		generateCountry("CA", "Canada", "Canada", "en-CA", "CAD", false),
-		generateCountry("AU", "Australia", "Australia", "en-AU", "AUD", false),
+// Function to initialize workers and the rate limiter
+func initializeWorkers(ctx context.Context, session *gocql.Session, numWorkers int, ratePerSecond int, jobs chan int, wg *sync.WaitGroup) {
+	rateLimiter := time.Tick(time.Second / time.Duration(ratePerSecond))
+
+	// Start up your workers
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go worker(ctx, session, jobs, wg, rateLimiter)
+	}
+}
+
+// Worker function for ScyllaDB
+// Processes jobs and queries translations, then outputs some result
+
+func worker(ctx context.Context, session *gocql.Session, jobs <-chan int, wg *sync.WaitGroup, rateLimiter <-chan time.Time) {
+	defer wg.Done()
+	entryTypes := []string{"11", "12", "13", "14"}
+
+	for job := range jobs {
+		select {
+		case <-ctx.Done():
+			return
+		case <-rateLimiter: // Wait for the rate limiter signal
+			entryType := entryTypes[rand.Intn(len(entryTypes))]
+			localeCode := "en-fr"
+
+			// Query translations
+			result, duration := queryTranslationsByEntryLocaleCode(session, entryType, localeCode)
+
+			// Process result if necessary
+			if len(result) > 0 {
+				fmt.Printf("Job: %d with entryType: %s. Completed in %v with %d translations\n", job, entryType, duration, len(result))
+			} else {
+				fmt.Printf("Job: %d with entryType: %s. Completed in %v with 0 translations\n", job, entryType, duration)
+			}
+		}
+	}
+}
+
+func seedLocaleData(session *gocql.Session) {
+	baseLocales := []string{
+		"NULL", "brand-de", "NULL", "brand-en-uk", "NULL", "brand-en-us", "NULL", "brand-fr",
+		"NULL", "cz", "NULL", "cz-fr", "NULL", "da-fr", "NULL", "de", "NULL", "de-babies",
+		"NULL", "de-fr", "NULL", "el-fr", "NULL", "en-dev", "NULL", "en-fr", "NULL", "en-uk",
+		"NULL", "en-uk-fr", "NULL", "en-us", "NULL", "en-us-babies", "NULL", "en-us-fr", "NULL",
+		"es", "NULL", "es-fr", "NULL", "es-us-fr", "NULL", "fi-fr", "NULL", "fr", "NULL",
+		"fr-babies", "NULL", "hr-fr", "NULL", "hu-fr", "NULL", "it", "NULL", "it-fr", "NULL",
+		"lt", "NULL", "lt-babies", "NULL", "lt-fr", "NULL", "nl", "NULL", "nl-fr", "NULL",
+		"pl", "NULL", "pl-fr", "NULL", "pt-fr", "NULL", "ro-fr", "NULL", "sk-fr", "NULL", "sv-fr",
+		"AT", "de-fr", "BE", "en-fr", "BE", "es-fr", "BE", "fr", "BE", "nl-fr", "CA", "en-us-fr",
+		"CZ", "cz-fr", "CZ", "en-fr", "DE", "de-fr", "DE", "en-fr", "DK", "da-fr", "DK", "en-fr",
+		"ES", "en-fr", "ES", "es-fr", "ES", "fr", "ES", "nl-fr", "FI", "en-fr", "FI", "fi-fr",
+		"FR", "en-fr", "FR", "es-fr", "FR", "fr", "FR", "nl-fr", "GR", "el-fr", "GR", "en-fr",
+		"HR", "en-fr", "HR", "hr-fr", "HU", "en-fr", "HU", "hu-fr", "IT", "en-fr", "IT", "it-fr",
+		"LT", "en-fr", "LT", "lt-fr", "LU", "en-fr", "LU", "es-fr", "LU", "fr", "LU", "nl-fr",
+		"NL", "en-fr", "NL", "es-fr", "NL", "fr", "NL", "nl-fr", "PL", "en-fr", "PL", "pl-fr",
+		"PT", "en-fr", "PT", "pt-fr", "RO", "en-fr", "RO", "ro-fr", "SE", "en-fr", "SE", "sv-fr",
+		"SK", "en-fr", "SK", "sk-fr", "UK", "en-uk-fr", "US", "en-us-fr", "US", "es-us-fr",
 	}
 
-	for _, country := range countries {
-		saveCountry(session, country)
+	// Define a map of base countries
+	baseCountries := map[string]models.Country{
+		"AT": generateCountry("AT", "Austria", "Österreich", "de-AT", "EUR", false),
+		"BE": generateCountry("BE", "Belgium", "Belgium", "en-BE", "EUR", false),
+		"CA": generateCountry("CA", "Canada", "Canada", "en-CA", "CAD", false),
+		"CZ": generateCountry("CZ", "Czech Republic", "Česko", "cz-CZ", "CZK", false),
+		"DE": generateCountry("DE", "Germany", "Deutschland", "de-DE", "EUR", false),
+		"DK": generateCountry("DK", "Denmark", "Danmark", "da-DK", "DKK", false),
+		"ES": generateCountry("ES", "Spain", "España", "es-ES", "EUR", false),
+		"FI": generateCountry("FI", "Finland", "Suomi", "fi-FI", "EUR", false),
+		"FR": generateCountry("FR", "France", "France", "fr-FR", "EUR", false),
+		"GR": generateCountry("GR", "Greece", "Ελλάδα", "el-GR", "EUR", false),
+		"HR": generateCountry("HR", "Croatia", "Hrvatska", "hr-HR", "HRK", false),
+		"HU": generateCountry("HU", "Hungary", "Magyarország", "hu-HU", "HUF", false),
+		"IT": generateCountry("IT", "Italy", "Italia", "it-IT", "EUR", false),
+		"LT": generateCountry("LT", "Lithuania", "Lietuva", "lt-LT", "EUR", false),
+		"LU": generateCountry("LU", "Luxembourg", "Luxembourg", "en-LU", "EUR", false),
+		"NL": generateCountry("NL", "Netherlands", "Nederland", "nl-NL", "EUR", false),
+		"PL": generateCountry("PL", "Poland", "Polska", "pl-PL", "PLN", false),
+		"PT": generateCountry("PT", "Portugal", "Portugal", "pt-PT", "EUR", false),
+		"RO": generateCountry("RO", "Romania", "România", "ro-RO", "RON", false),
+		"SE": generateCountry("SE", "Sweden", "Sverige", "sv-SE", "SEK", false),
+		"SK": generateCountry("SK", "Slovakia", "Slovensko", "sk-SK", "EUR", false),
+		"UK": generateCountry("GB", "United Kingdom", "United Kingdom", "en-GB", "GBP", false),
+		"US": generateCountry("US", "United States", "United States", "en-US", "USD", false),
+	}
 
-		// Generate and save the locale for each country-language combination
-		locale := generateLocale(country, language)
-		saveLocale(session, locale)
+	uniqueLocales := make(map[string]models.Locale)
+	uniqueLanguages := make(map[string]models.Language)
+	uniqueCountries := make(map[string]models.Country)
+
+	for i := 0; i < len(baseLocales)-1; i += 2 {
+		countryCode := baseLocales[i]
+		localeCode := baseLocales[i+1]
+
+		if countryCode == "NULL" {
+			countryCode = "base"
+		}
+
+		// Extract the language code from the locale code
+		languageCode := strings.Split(localeCode, "-")[0]
+		language := generateLanguage(languageCode, languageCode, languageCode)
+
+		// Save the language if it doesn't exist
+		if _, exists := uniqueLanguages[languageCode]; !exists {
+			saveLanguage(session, language)
+			uniqueLanguages[languageCode] = language
+		}
+
+		// Handle the country
+		if countryCode != "base" {
+			country := baseCountries[countryCode]
+			if _, exists := uniqueCountries[countryCode]; !exists {
+				saveCountry(session, country)
+				uniqueCountries[countryCode] = country
+			}
+
+			// Create and save the locale
+			locale := generateLocale(country, language)
+			locale.Code = localeCode
+			if _, exists := uniqueLocales[localeCode]; !exists {
+				saveLocale(session, locale)
+				uniqueLocales[localeCode] = locale
+			}
+		}
 	}
 }
 
@@ -199,17 +325,24 @@ func seedMultipleTranslations(session *gocql.Session, p *kafka.Producer, count i
 
 	// Channel to distribute work
 	jobs := make(chan int, count)
-
+	locales := getAllUniqueLocales(session)
 	// Start workers
 	for i := 0; i < numWorkers; i++ {
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				// Generate and insert a translation
-				tk := generateTranslationKey(job)
-				createTranslationKey(session, tk)
-				t := generateBaseTranslation(tk, job)
-				updateTranslation(session, p, t)
+				// generate multiple entry_type
+				entryTypes := []string{"11", "12", "13", "14"}
+				// loop over entryType
+				for _, entryType := range entryTypes {
+					// Generate and insert a translation
+					tk := generateTranslationKey(job, entryType)
+					createTranslationKey(session, tk)
+					for _, locale := range locales {
+						t := generateBaseTranslation(tk, locale.Code)
+						updateTranslation(session, p, t)
+					}
+				}
 			}
 		}()
 	}
@@ -227,22 +360,37 @@ func seedMultipleTranslations(session *gocql.Session, p *kafka.Producer, count i
 	log.Printf("Seeding completed in %s\n", time.Since(start))
 }
 
-func generateTranslationKey(jobID int) models.TranslationKey {
+func generateTranslationKey(jobID int, entryType string) models.TranslationKey {
 	return models.TranslationKey{
-		Name:      fmt.Sprintf("TRANSLATION_KEY_%d", jobID),
-		EntryType: "11", // or change it dynamically if needed
+		Name:      fmt.Sprintf("TRANSLATION_KEY_%s_%d", entryType, jobID),
+		EntryType: entryType, // or change it dynamically if needed
 	}
 }
 
-func generateBaseTranslation(tk models.TranslationKey, jobID int) models.Translation {
+func generateBaseTranslation(tk models.TranslationKey, localeCode string) models.Translation {
 	value := randomText(5000)
 	return models.Translation{
 		TranslationKeyName: tk.Name,
 		RowValue:           value,
 		CalcValue:          value,
-		LocaleCode:         "en", // or use a dynamic locale code if needed
+		LocaleCode:         localeCode, // or use a dynamic locale code if needed
 		EntryType:          tk.EntryType,
 	}
+}
+
+func getAllUniqueLocales(session *gocql.Session) []models.Locale {
+	var locales []models.Locale
+	var locale models.Locale
+
+	iter := session.Query(`SELECT country_code, language_code, code, fallback FROM locales`).Iter()
+	for iter.Scan(&locale.CountryCode, &locale.LanguageCode, &locale.Code, &locale.Fallback) {
+		locales = append(locales, locale)
+	}
+	if err := iter.Close(); err != nil {
+		log.Println("Query error:", err)
+	}
+
+	return locales
 }
 
 // Function to generate random text of random length up to maxLength
@@ -282,76 +430,76 @@ func updateTranslation(session *gocql.Session, p *kafka.Producer, t models.Trans
 		return // Skip Kafka push if save failed
 	}
 
-	// Query to fetch fallback locale codes
-	var fallbackCodes []string
-	iter := session.Query(`SELECT code FROM locales_by_fallback WHERE fallback = ?`, t.LocaleCode).Iter()
-	defer iter.Close() // Ensure iterator is closed
+	// // Query to fetch fallback locale codes
+	// var fallbackCodes []string
+	// iter := session.Query(`SELECT code FROM locales_by_fallback WHERE fallback = ?`, t.LocaleCode).Iter()
+	// defer iter.Close() // Ensure iterator is closed
 
-	var code string
-	for iter.Scan(&code) {
-		fallbackCodes = append(fallbackCodes, code)
-	}
-	if err = iter.Close(); err != nil {
-		log.Printf("Query iterator error: %v", err)
-		return
-	}
+	// var code string
+	// for iter.Scan(&code) {
+	// 	fallbackCodes = append(fallbackCodes, code)
+	// }
+	// if err = iter.Close(); err != nil {
+	// 	log.Printf("Query iterator error: %v", err)
+	// 	return
+	// }
 
-	// If no fallback codes were found, return early
-	if len(fallbackCodes) == 0 {
-		return
-	}
+	// // If no fallback codes were found, return early
+	// if len(fallbackCodes) == 0 {
+	// 	return
+	// }
 
-	log.Printf("Fallback codes: %v", fallbackCodes)
+	// log.Printf("Fallback codes: %v", fallbackCodes)
 
-	// Select all translations with the same translation key name and any of the fallback locale codes
-	iter = session.Query(`SELECT entry_type, locale_code, translation_key_name, row_value, calc_value FROM translations WHERE translation_key_name = ? AND locale_code IN ?`,
-		t.TranslationKeyName, fallbackCodes).Iter()
-	defer iter.Close() // Ensure iterator is closed
+	// // Select all translations with the same translation key name and any of the fallback locale codes
+	// iter = session.Query(`SELECT entry_type, locale_code, translation_key_name, row_value, calc_value FROM translations WHERE translation_key_name = ? AND locale_code IN ?`,
+	// 	t.TranslationKeyName, fallbackCodes).Iter()
+	// defer iter.Close() // Ensure iterator is closed
 
-	var childTranslations []models.Translation
-	var tempTranslation models.Translation
-	for iter.Scan(&tempTranslation.EntryType, &tempTranslation.LocaleCode, &tempTranslation.TranslationKeyName, &tempTranslation.RowValue, &tempTranslation.CalcValue) {
-		childTranslations = append(childTranslations, tempTranslation)
-	}
-	if err = iter.Close(); err != nil {
-		log.Printf("Query error: %v", err)
-	}
+	// var childTranslations []models.Translation
+	// var tempTranslation models.Translation
+	// for iter.Scan(&tempTranslation.EntryType, &tempTranslation.LocaleCode, &tempTranslation.TranslationKeyName, &tempTranslation.RowValue, &tempTranslation.CalcValue) {
+	// 	childTranslations = append(childTranslations, tempTranslation)
+	// }
+	// if err = iter.Close(); err != nil {
+	// 	log.Printf("Query error: %v", err)
+	// }
 
-	log.Printf("Fallback translations: %v", childTranslations)
+	// log.Printf("Fallback translations: %v", childTranslations)
 
-	// if no child translations found, create new translations
-	if len(childTranslations) == 0 && len(fallbackCodes) > 0 {
-		// create new translations
-		for _, code := range fallbackCodes {
-			// create new translation
-			newTranslation := models.Translation{
-				TranslationKeyName: t.TranslationKeyName,
-				RowValue:           t.CalcValue,
-				CalcValue:          t.CalcValue,
-				LocaleCode:         code,
-				EntryType:          t.EntryType,
-			}
-			// push to kafka
-			pushKafkaMessage(p, newTranslation)
-		}
-	} else {
-		// if child translations found, update them
-		// Push message to Kafka for each fallback code to update child translations
-		for _, childTranslation := range childTranslations {
-			if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
-				log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
-				// update calculated value
-				childTranslation.CalcValue = t.RowValue
-				pushKafkaMessage(p, childTranslation)
-			} else {
-				if childTranslation.RowValue != "" {
-					log.Printf("Skipping update child translation since row value is not empty")
-				} else if childTranslation.CalcValue == t.CalcValue {
-					log.Printf("Skipping update child translation since calc value is the same")
-				}
-			}
-		}
-	}
+	// // if no child translations found, create new translations
+	// if len(childTranslations) == 0 && len(fallbackCodes) > 0 {
+	// 	// create new translations
+	// 	for _, code := range fallbackCodes {
+	// 		// create new translation
+	// 		newTranslation := models.Translation{
+	// 			TranslationKeyName: t.TranslationKeyName,
+	// 			RowValue:           t.CalcValue,
+	// 			CalcValue:          t.CalcValue,
+	// 			LocaleCode:         code,
+	// 			EntryType:          t.EntryType,
+	// 		}
+	// 		// push to kafka
+	// 		pushKafkaMessage(p, newTranslation)
+	// 	}
+	// } else {
+	// 	// if child translations found, update them
+	// 	// Push message to Kafka for each fallback code to update child translations
+	// 	for _, childTranslation := range childTranslations {
+	// 		if childTranslation.RowValue == "" && childTranslation.CalcValue != t.RowValue {
+	// 			log.Printf("Since row value is empty, updating child translation via kafka: %v", childTranslation)
+	// 			// update calculated value
+	// 			childTranslation.CalcValue = t.RowValue
+	// 			pushKafkaMessage(p, childTranslation)
+	// 		} else {
+	// 			if childTranslation.RowValue != "" {
+	// 				log.Printf("Skipping update child translation since row value is not empty")
+	// 			} else if childTranslation.CalcValue == t.CalcValue {
+	// 				log.Printf("Skipping update child translation since calc value is the same")
+	// 			}
+	// 		}
+	// 	}
+	// }
 }
 
 func pushKafkaMessage(p *kafka.Producer, translation models.Translation) {
