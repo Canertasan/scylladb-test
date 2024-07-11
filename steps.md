@@ -43,4 +43,18 @@ CREATE TABLE locales (
     FOREIGN KEY (country_code) REFERENCES countries(code),
     FOREIGN KEY (language_code) REFERENCES languages(code)
 );
+
+
+-- Bundle query adding indexes
+-- Add index on entry_type in translation_keys table
+CREATE INDEX idx_entry_type ON translation_keys(entry_type);
+
+CREATE INDEX idx_locale_code_translation_key_id ON translations(locale_code, translation_key_id);
+
+-- Drop index on entry_type in translation_keys table
+DROP INDEX idx_entry_type ON translation_keys;
+
+-- Drop index on translation_key_id in translations table for the JOIN
+DROP INDEX idx_locale_code_translation_key_id ON translations;
+
 ```
